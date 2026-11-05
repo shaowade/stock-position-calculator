@@ -64,6 +64,14 @@ header.top p { margin: 0; color: var(--muted); font-size: 12.5px; }
 .sync-state[data-s="saving"] .dot { background: #d3a021; animation: pulse 1s infinite; }
 .sync-state[data-s="offline"] .dot { background: #d3a021; }
 .sync-state[data-s="error"] .dot { background: var(--danger); }
+.sync-state[data-s="off"] .dot { background: #c6ccd4; }
+.sync-state[data-s="ok"] .dot { background: #2f8a55; box-shadow: 0 0 0 3px rgba(47,138,85,.12); }
+.sync-state[data-s="saving"] .dot { background: #d3a021; animation: pulse 1s infinite; }
+.cloud-badge {
+  display: inline-block; font-size: 11.5px; padding: 2px 9px; border-radius: 3px;
+  background: #f2f4f6; color: var(--muted); border: 1px solid var(--border); white-space: nowrap;
+}
+.cloud-badge.on { background: var(--ok-soft); color: var(--ok); border-color: #cfe0d5; }
 .sync-state[data-s="conflict"] .dot { background: var(--danger); animation: pulse 1s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
 .sync-state .txt { font-variant-numeric: tabular-nums; }
@@ -337,7 +345,9 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
     <div class="sync-state" id="saveState" data-s="idle">
       <span class="dot"></span><span class="txt" id="saveText">正在载入…</span>
     </div>
-    <div class="sync-key">数据保存在本机浏览器，建议定期<b>导出备份</b></div>
+    <div class="sync-state" id="cloudState" data-s="off">
+      <span class="dot"></span><span class="txt" id="cloudText">未开启同步</span>
+    </div>
     <span class="spacer"></span>
     <span class="quote-status" id="quoteStatus">行情未更新</span>
     <button class="btn btn-sm" id="btnRefreshQuote" type="button">刷新行情</button>
@@ -516,6 +526,15 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
       <button class="btn btn-ghost btn-sm" id="btnCloseManage" type="button">关闭</button>
     </div>
     <div class="modal-bd">
+      <div class="field">
+        <label>云端同步（跨设备）</label>
+        <div id="syncPanel"></div>
+        <div class="desc">
+          开启后，数据会自动存到你 GitHub 账号下的一个<b>私密 Gist</b> 里，电脑上改完手机打开就是最新的。<br>
+          令牌只保存在本机浏览器，不会上传到任何服务器；本页不加载任何第三方脚本，令牌不会被外部代码读取。
+        </div>
+      </div>
+
       <div class="field">
         <label>备份与恢复</label>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -798,7 +817,6 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
     });
 
     row.querySelector('.f-name').addEventListener('input', onEdit);
-    row.querySelector('.f-name').addEventListener('blur', function () { autoMatchCode(row); });
 
     var fCode = row.querySelector('.f-code');
     fCode.addEventListener('input', onEdit);
@@ -823,22 +841,6 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
 
     rowsBox.appendChild(row);
     return row;
-  }
-
-  function autoMatchCode(row) {
-    var nameEl = row.querySelector('.f-name');
-    var codeEl = row.querySelector('.f-code');
-    var name = (nameEl.value || '').trim();
-    if (!name || (codeEl.value || '').trim()) return;
-    jsonpSearch(name).then(function (list) {
-      if (!list || !list.length) return;
-      if ((codeEl.value || '').trim()) return;
-      var hit = list[0];
-      for (var i = 0; i < list.length; i++) if (list[i].name === name) { hit = list[i]; break; }
-      codeEl.value = hit.code.replace(/^(sh|sz|bj)/, '');
-      onEdit();
-      refreshQuotes(true);
-    });
   }
 
   function addRow(data) {
@@ -930,6 +932,8 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
     try {
       localStorage.setItem(LS_DATA, JSON.stringify({ records: snapshot(), updatedAt: new Date().toISOString() }));
       setSaveState('ok', '已保存到本机 · ' + clockText());
+      setDirty(true);
+      ghSchedulePush();
     } catch (e) {
       setSaveState('warn', '保存失败（存储空间可能已满）');
     }
@@ -952,79 +956,315 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
     $('saveText').textContent = text;
   }
 
-  /* ================= 行情（JSONP） ================= */
-  function jsonpQuotes(codes) {
-    return new Promise(function (resolve) {
-      if (!codes || !codes.length) return resolve({});
-      var script = document.createElement('script');
-      var done = false;
-      var timer = setTimeout(function () { finish(); }, 9000);
+  /* ================= 云端同步（你自己的 GitHub 私密 Gist） ================= */
+  var GH_TOKEN_KEY = 'spc.gh.token';
+  var GH_GIST_KEY = 'spc.gh.gist';
+  var GH_GIST_DESC = '股票持仓仓位计算器 · 同步数据';
+  var GH_FILE = 'positions.json';
 
-      function finish() {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        var out = {};
-        codes.forEach(function (c) {
-          var v = window['v_' + c];
-          if (!v) return;
-          var f = String(v).split('~');
-          if (f.length < 33 || !f[3]) return;
-          var price = parseFloat(f[3]);
-          if (!isFinite(price) || price <= 0) return;
-          out[c.slice(2)] = {
-            code: c, name: f[1] || '', price: price, priceStr: f[3],
-            prevClose: parseFloat(f[4]) || 0, changePct: parseFloat(f[32]) || 0
-          };
-        });
-        try { script.remove(); } catch (e) {}
-        resolve(out);
-      }
+  var sync = { token: '', gistId: '', busy: false, at: null };
+  var pushTimer = null;
 
-      script.charset = 'gbk';
-      script.onload = finish;
-      script.onerror = finish;
-      script.src = 'https://qt.gtimg.cn/q=' + codes.join(',') + '&_=' + Date.now();
-      document.head.appendChild(script);
+  function ghLoad() {
+    try {
+      sync.token = localStorage.getItem(GH_TOKEN_KEY) || '';
+      sync.gistId = localStorage.getItem(GH_GIST_KEY) || '';
+    } catch (e) {}
+  }
+  function ghStore(token, gistId) {
+    try {
+      if (token != null) localStorage.setItem(GH_TOKEN_KEY, token);
+      if (gistId != null) localStorage.setItem(GH_GIST_KEY, gistId);
+    } catch (e) {}
+    sync.token = token != null ? token : sync.token;
+    sync.gistId = gistId != null ? gistId : sync.gistId;
+  }
+  function ghForget() {
+    try {
+      localStorage.removeItem(GH_TOKEN_KEY);
+      localStorage.removeItem(GH_GIST_KEY);
+    } catch (e) {}
+    setLinked(false);
+    setDirty(false);
+    sync.token = ''; sync.gistId = ''; sync.at = null;
+    setCloudState('off', '未开启同步');
+    renderSyncPanel();
+  }
+
+  function ghApi(path, opts) {
+    opts = opts || {};
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 20000);
+    function done(v) { clearTimeout(timer); return v; }
+    return fetch('https://api.github.com' + path, {
+      method: opts.method || 'GET',
+      headers: {
+        'Authorization': 'Bearer ' + sync.token,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      cache: 'no-store',
+      signal: ctrl.signal
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        return done({ ok: r.ok, status: r.status, data: d });
+      });
+    }, function (err) {
+      return done({ ok: false, status: 0, data: {}, error: err });
     });
   }
 
-  function jsonpSearch(name) {
-    return new Promise(function (resolve) {
-      var cb = '__emcb' + Date.now() + Math.floor(Math.random() * 1000);
-      var script = document.createElement('script');
-      var done = false;
-      var timer = setTimeout(function () { finish([]); }, 8000);
+  function ghPayload() {
+    return {
+      app: '股票持仓仓位计算器',
+      version: 4,
+      updatedAt: new Date().toISOString(),
+      records: snapshot()
+    };
+  }
 
-      function finish(list) {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        try { delete window[cb]; script.remove(); } catch (e) {}
-        resolve(list || []);
+  function setCloudState(kind, text) {
+    var el = $('cloudState');
+    if (!el) return;
+    el.setAttribute('data-s', kind);
+    $('cloudText').textContent = text;
+    renderSyncPanel();
+  }
+
+  /* 验证令牌，并找到（或创建）同步用的 Gist */
+  function ghConnect(token) {
+    sync.token = (token || '').trim();
+    if (!sync.token) return Promise.reject(new Error('请先填写令牌'));
+    setCloudState('saving', '正在验证令牌…');
+
+    return ghApi('/user').then(function (r) {
+      if (r.status === 401) throw new Error('令牌无效或已过期');
+      if (!r.ok) throw new Error('验证失败（' + r.status + '）');
+      return ghApi('/gists?per_page=100');
+    }).then(function (r) {
+      if (r.status === 403) throw new Error('令牌缺少 Gist 权限');
+      if (!r.ok) throw new Error('读取 Gist 列表失败（' + r.status + '）');
+
+      var found = null;
+      (r.data || []).forEach(function (g) {
+        if (g && g.description === GH_GIST_DESC) found = g;
+      });
+      if (found) {
+        ghStore(sync.token, found.id);
+        return 'found';
+      }
+      // 没有就新建一个（私密 Gist，不公开）
+      var payload = ghPayload();
+      var files = {};
+      files[GH_FILE] = { content: JSON.stringify(payload, null, 2) };
+      return ghApi('/gists', {
+        method: 'POST',
+        body: { description: GH_GIST_DESC, public: false, files: files }
+      }).then(function (c) {
+        if (!c.ok) throw new Error('创建同步空间失败（' + c.status + '）');
+        ghStore(sync.token, c.data.id);
+        sync.at = payload.updatedAt;
+        return 'created';
+      });
+    });
+  }
+
+  function ghPush() {
+    if (!sync.token || !sync.gistId) return Promise.resolve();
+    if (sync.busy) return Promise.resolve();
+    sync.busy = true;
+    var payload = ghPayload();
+    var files = {};
+    files[GH_FILE] = { content: JSON.stringify(payload, null, 2) };
+
+    return ghApi('/gists/' + sync.gistId, { method: 'PATCH', body: { files: files } })
+      .then(function (r) {
+        sync.busy = false;
+        if (!r.ok) throw new Error('上传失败（' + r.status + '）');
+        sync.at = payload.updatedAt;
+        setDirty(false);
+        setCloudState('ok', '已同步 · ' + clockText());
+      })
+      .catch(function (e) {
+        sync.busy = false;
+        setCloudState('error', '同步失败：' + e.message);
+      });
+  }
+
+  /* 拉取云端内容（文件被截断时回落到 raw_url） */
+  function ghPull() {
+    if (!sync.token || !sync.gistId) return Promise.resolve(null);
+    return ghApi('/gists/' + sync.gistId).then(function (r) {
+      if (!r.ok) return null;
+      var f = r.data && r.data.files && r.data.files[GH_FILE];
+      if (!f) return null;
+      if (!f.truncated && f.content) return f.content;
+      if (f.raw_url) return fetch(f.raw_url).then(function (x) { return x.text(); });
+      return f.content || null;
+    });
+  }
+
+  function ghSchedulePush() {
+    if (!sync.token || !sync.gistId) return;
+    if (pushTimer) clearTimeout(pushTimer);
+    setCloudState('saving', '等待同步…');
+    pushTimer = setTimeout(function () { ghPush(); }, 1800);
+  }
+
+  /* 打开页面时：连接 → 比较两端时间 → 决定拉取还是推送 */
+  function ghBootstrap() {
+    ghLoad();
+    if (!sync.token) { setCloudState('off', '未开启同步'); return Promise.resolve(); }
+    return ghConnect(sync.token).then(afterConnect).catch(function (e) {
+      setCloudState('error', e.message || '同步未连接');
+    });
+  }
+
+  function isLinked() {
+    try { return localStorage.getItem('spc.gh.linked') === '1'; } catch (e) { return false; }
+  }
+  function setLinked(v) {
+    try {
+      if (v) localStorage.setItem('spc.gh.linked', '1');
+      else localStorage.removeItem('spc.gh.linked');
+    } catch (e) {}
+  }
+  /* 本地是否有还没推上去的改动 */
+  function isDirty() {
+    try { return localStorage.getItem('spc.gh.dirty') === '1'; } catch (e) { return false; }
+  }
+  function setDirty(v) {
+    try { localStorage.setItem('spc.gh.dirty', v ? '1' : '0'); } catch (e) {}
+  }
+
+  function sameRecords(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if ((a[i].name || '').trim() !== (b[i].name || '').trim()) return false;
+      if ((a[i].code || '') !== (b[i].code || '')) return false;
+      if (num(a[i].shares).value !== num(b[i].shares).value) return false;
+      if (num(a[i].cost).value !== num(b[i].cost).value) return false;
+      if ((a[i].category || '').trim() !== (b[i].category || '').trim()) return false;
+      if ((a[i].cycle || '') !== (b[i].cycle || '')) return false;
+    }
+    return true;
+  }
+
+  /* 连接成功后的处理
+     规则：首次连接 / 本地无改动 → 以云端为准；本地有未推送改动 → 推上去 */
+  function afterConnect(action) {
+    if (action === 'created') {
+      setLinked(true);
+      setDirty(false);
+      setCloudState('ok', '同步已就绪 · ' + clockText());
+      return Promise.resolve();
+    }
+
+    var firstTime = !isLinked();
+    setLinked(true);
+
+    if (!firstTime && isDirty()) return ghPush();
+
+    return ghPull().then(function (text) {
+      var remote = null;
+      if (text) { try { remote = JSON.parse(text); } catch (e) {} }
+      if (!remote || !Array.isArray(remote.records) || !remote.records.length) return ghPush();
+
+      if (sameRecords(remote.records, snapshot())) {
+        sync.at = remote.updatedAt;
+        setDirty(false);
+        setCloudState('ok', '已同步 · ' + clockText(remote.updatedAt));
+        return;
       }
 
-      window[cb] = function (data) {
-        var rows = (data && data.QuotationCodeTable && data.QuotationCodeTable.Data) || [];
-        var list = [];
-        rows.forEach(function (r) {
-          var qid = String(r.QuoteID || '');
-          var mk = qid.split('.')[0];
-          var raw = String(r.Code || '');
-          if (!/^\d{6}$/.test(raw)) return;
-          var prefix = mk === '1' ? 'sh' : (mk === '0' ? 'sz' : '');
-          if (!prefix) return;
-          if (list.some(function (x) { return x.code === prefix + raw; })) return;
-          list.push({ code: prefix + raw, name: r.Name || '' });
-        });
-        finish(list);
-      };
-
-      script.onerror = function () { finish([]); };
-      script.src = 'https://searchapi.eastmoney.com/api/suggest/get?input=' +
-        encodeURIComponent(name) + '&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&cb=' + cb;
-      document.head.appendChild(script);
+      applyRecords(remote.records, true);
+      try {
+        localStorage.setItem(LS_DATA, JSON.stringify({ records: snapshot(), updatedAt: new Date().toISOString() }));
+      } catch (e) {}
+      setSaveState('ok', '已保存到本机 · ' + clockText());
+      setDirty(false); // 刚拉下来的就是云端内容，不需要再推
+      sync.at = remote.updatedAt;
+      setCloudState('ok', '已载入云端 · ' + clockText(remote.updatedAt));
+      if (!firstTime) toast('已载入云端最新数据', 'ok');
+      else toast('已载入云端数据', 'ok');
     });
+  }
+
+  function renderSyncPanel() {
+    var box = $('syncPanel');
+    if (!box) return;
+    var on = !!sync.token;
+    var gistLink = sync.gistId ? ('https://gist.github.com/' + sync.gistId) : '';
+    box.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
+        '<span class="cloud-badge ' + (on ? 'on' : '') + '">' + (on ? '已连接' : '未连接') + '</span>' +
+        '<span style="font-size:12.5px;color:var(--text-2);">' + (on ? '数据自动同步到你的 GitHub 私密 Gist' : '开启后电脑手机自动同步') + '</span>' +
+      '</div>' +
+      (on
+        ? '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+            '<button class="btn btn-sm" id="btnSyncNow" type="button">立即同步</button>' +
+            '<button class="btn btn-sm btn-danger" id="btnSyncOff" type="button">关闭同步</button>' +
+            (gistLink ? '<a class="btn btn-sm" href="' + gistLink + '" target="_blank" rel="noopener" style="text-decoration:none;line-height:1.6;">查看云端数据</a>' : '') +
+          '</div>'
+        : '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
+            '<input type="password" id="ghTokenInput" placeholder="粘贴 GitHub 令牌（ghp_... 或 github_pat_...）" ' +
+              'style="flex:1;min-width:220px;padding:7px 10px;border:1px solid var(--border-strong);border-radius:3px;font-size:12.5px;font-family:ui-monospace,monospace;">' +
+            '<button class="btn btn-sm btn-primary" id="btnSyncOn" type="button">开启同步</button>' +
+          '</div>');
+
+    var btnOn = $('btnSyncOn');
+    if (btnOn) btnOn.addEventListener('click', doConnect);
+    var btnNow = $('btnSyncNow');
+    if (btnNow) btnNow.addEventListener('click', function () {
+      toast('正在同步…');
+      ghConnect(sync.token).then(afterConnect).then(function () {
+        toast('同步完成', 'ok');
+      }).catch(function (e) { toast('同步失败：' + e.message, 'err'); });
+    });
+    var btnOff = $('btnSyncOff');
+    if (btnOff) btnOff.addEventListener('click', function () {
+      if (confirm('关闭同步后，这台设备不再上传数据（云端已有数据不会被删除）。继续？')) ghForget();
+    });
+  }
+
+  function doConnect() {
+    var input = $('ghTokenInput');
+    var token = input ? input.value.trim() : '';
+    if (!token) return toast('请先粘贴令牌', 'err');
+    if (input) input.value = '';
+    ghLoad();
+    ghConnect(token).then(afterConnect).then(function () {
+      toast('同步已开启', 'ok');
+    }).catch(function (e) {
+      setCloudState('error', e.message);
+      toast(e.message, 'err');
+    });
+  }
+
+  /* ================= 行情（fetch + GBK 解码，不加载任何第三方脚本） ================= */
+  function fetchQuotes(codes) {
+    if (!codes || !codes.length) return Promise.resolve({});
+    var url = 'https://qt.gtimg.cn/q=' + codes.join(',') + '&_=' + Date.now();
+    return fetch(url, { cache: 'no-store' })
+      .then(function (r) { return r.arrayBuffer(); })
+      .then(function (buf) {
+        var text = new TextDecoder('gbk').decode(buf);
+        var out = {};
+        text.split('\n').forEach(function (line) {
+          var m = line.match(/v_([a-z]{2}\d{6})="([^"]*)"/);
+          if (!m) return;
+          var f = m[2].split('~');
+          if (f.length < 33 || !f[3]) return;
+          var price = parseFloat(f[3]);
+          if (!isFinite(price) || price <= 0) return;
+          out[m[1].slice(2)] = {
+            code: m[1], name: f[1] || '', price: price, priceStr: f[3],
+            prevClose: parseFloat(f[4]) || 0, changePct: parseFloat(f[32]) || 0
+          };
+        });
+        return out;
+      });
   }
 
   function isTradingTime() {
@@ -1045,11 +1285,20 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
     if (!codes.length) { updateQuoteStatus(); return Promise.resolve(); }
 
     quoteBusy = true;
-    return jsonpQuotes(codes).then(function (d) {
+    return fetchQuotes(codes).then(function (d) {
       quoteBusy = false;
       var n = 0;
       Object.keys(d).forEach(function (k) { quotes[k] = d[k]; n++; });
       if (n) quoteAt = Date.now();
+      // 填了代码但没填名称时，自动带出股票名
+      var rows = rowsBox.querySelectorAll('.row');
+      for (var i = 0; i < rows.length; i++) {
+        var nameEl = rows[i].querySelector('.f-name');
+        var c = normalizeCode(rows[i].querySelector('.f-code').value);
+        if (c && !(nameEl.value || '').trim() && quotes[c.slice(2)]) {
+          nameEl.value = quotes[c.slice(2)].name;
+        }
+      }
       updateQuoteStatus(n ? null : 'fail');
       recalc();
     }).catch(function () {
@@ -1076,6 +1325,7 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
   /* ================= 编辑 ================= */
   function onEdit() {
     recalc();
+    setDirty(true);
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(saveNow, SAVE_DELAY);
   }
@@ -1393,7 +1643,12 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
     if (last) last.querySelector('.f-name').focus();
   });
 
-  window.addEventListener('beforeunload', function () { if (saveTimer) { clearTimeout(saveTimer); saveNow(); } });
+  window.addEventListener('beforeunload', function () {
+    if (saveTimer) clearTimeout(saveTimer);
+    try {
+      localStorage.setItem(LS_DATA, JSON.stringify({ records: snapshot(), updatedAt: new Date().toISOString() }));
+    } catch (e) {}
+  });
 
   /* ================= 启动 ================= */
   function boot() {
@@ -1408,6 +1663,7 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
     if (!storageOK) {
       setSaveState('warn', '浏览器禁用了本地存储 · 数据不会自动保存，请用「导出备份」');
     }
+    ghBootstrap();
     scheduleQuoteRefresh();
   }
 
