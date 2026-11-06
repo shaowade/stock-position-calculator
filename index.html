@@ -182,8 +182,8 @@ input.f.invalid:focus { box-shadow: 0 0 0 2px rgba(179,69,60,.10); }
 .row-del .btn { padding: 4px 8px; font-size: 12px; line-height: 1.2; }
 
 /* ---------- 顶部统计 ---------- */
-.stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 4px; margin-bottom: 18px; overflow: hidden; }
-.stat { background: #fff; padding: 14px 16px; }
+.stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 4px; margin-bottom: 18px; overflow: hidden; }
+.stat { background: #fff; padding: 14px 14px; }
 .stat .k { font-size: 12px; color: var(--muted); margin-bottom: 6px; letter-spacing: .3px; }
 .stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: .3px; }
 .stat .v small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 3px; }
@@ -367,6 +367,11 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
       <div class="k">浮动盈亏</div>
       <div class="v flat" id="statPnl">0.00</div>
       <div class="kp"><span id="statPnlPct" class="sub flat"></span></div>
+    </div>
+    <div class="stat">
+      <div class="k">当日盈亏</div>
+      <div class="v flat" id="statDayPnl">0.00</div>
+      <div class="kp"><span id="statDayPnlPct" class="sub flat"></span></div>
     </div>
     <div class="stat strong">
       <div class="k">强周期占比</div>
@@ -1480,6 +1485,24 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
     pe.className = 'v ' + pnlClass(totalPnl);
     $('statPnlPct').textContent = totalCost > 0 ? (totalPnl > 0 ? '+' : '') + (totalPnl / totalCost * 100).toFixed(2) + '%' : '';
     $('statPnlPct').className = 'sub ' + pnlClass(totalPnl);
+
+    /* 当日盈亏 = Σ (现价 - 昨收) × 持股数 */
+    var dayPnl = 0, prevMv = 0;
+    list.forEach(function (r) {
+      if (r.quote && r.shares > 0 && r.quote.prevClose > 0) {
+        dayPnl += (r.quote.price - r.quote.prevClose) * r.shares;
+        prevMv += r.quote.prevClose * r.shares;
+      } else {
+        prevMv += r.mv; // 现金 / 无行情部分按现值计
+      }
+    });
+    var dayPct = prevMv > 0 ? dayPnl / prevMv * 100 : 0;
+    var dpe = $('statDayPnl');
+    dpe.textContent = (dayPnl > 0 ? '+' : '') + money(dayPnl);
+    dpe.className = 'v ' + pnlClass(dayPnl);
+    var dpp = $('statDayPnlPct');
+    dpp.textContent = quoteAt ? ((dayPnl > 0 ? '+' : '') + dayPct.toFixed(2) + '%') : '待获取行情';
+    dpp.className = 'sub ' + (quoteAt ? pnlClass(dayPnl) : 'muted');
     $('statStrong').textContent = pct(strong, totalMv);
     $('statWeak').textContent = pct(weak, totalMv);
     $('statStrongAmt').textContent = shortMoney(strong);
