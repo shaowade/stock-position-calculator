@@ -197,7 +197,9 @@ input.f.invalid:focus { box-shadow: 0 0 0 2px rgba(179,69,60,.10); }
 .stat .v.down { color: #1e8449; }
 .stat .v.flat { color: var(--text-2); }
 .code-cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--text-2); }
-.wide-table { min-width: 1020px; }
+.wide-table { min-width: 1078px; table-layout: fixed; }
+.wide-table th, .wide-table td { white-space: nowrap; }
+.wide-table th:nth-child(2), .wide-table td:nth-child(2) { overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- 表格 ---------- */
 table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
@@ -301,7 +303,7 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
 
   .card-bd.flush { overflow-x: auto; }
   .sum-table { overflow-x: auto; }
-  .card-bd.flush table { min-width: 1020px; }
+  .card-bd.flush table { min-width: 1078px; }
   .sum-table table { min-width: 640px; }
 
   .toolbar { padding: 10px 14px; }
@@ -467,18 +469,19 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
       <table class="wide-table">
         <thead>
           <tr>
-            <th style="width:44px;">#</th>
-            <th>股票名称</th>
-            <th style="width:80px;">代码</th>
-            <th style="width:90px;text-align:right;">现价</th>
-            <th style="width:90px;text-align:right;">涨跌幅</th>
-            <th style="width:95px;text-align:right;">持股数</th>
-            <th style="width:95px;text-align:right;">成本价</th>
-            <th style="width:120px;text-align:right;">投入成本</th>
-            <th style="width:120px;text-align:right;">当前市值</th>
-            <th style="width:120px;text-align:right;">盈亏</th>
-            <th style="width:90px;text-align:right;">持仓占比</th>
-            <th style="width:72px;text-align:center;">操作</th>
+            <th style="width:34px;">#</th>
+            <th style="width:112px;">股票名称</th>
+            <th style="width:66px;">代码</th>
+            <th style="width:76px;text-align:right;">现价</th>
+            <th style="width:76px;text-align:right;">涨跌幅</th>
+            <th style="width:78px;text-align:right;">持股数</th>
+            <th style="width:78px;text-align:right;">成本价</th>
+            <th style="width:98px;text-align:right;">投入成本</th>
+            <th style="width:98px;text-align:right;">当前市值</th>
+            <th style="width:98px;text-align:right;">盈亏</th>
+            <th style="width:98px;text-align:right;">当日盈亏</th>
+            <th style="width:76px;text-align:right;">持仓占比</th>
+            <th style="width:54px;text-align:center;">操作</th>
           </tr>
         </thead>
         <tbody id="detailBody"></tbody>
@@ -1395,8 +1398,19 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
         '<em>' + (d.pnl > 0 ? '+' : '') + d.pnlPct.toFixed(2) + '%</em></span>';
     }
 
-    var totalCost = 0, totalMv = 0;
-    list.forEach(function (r) { totalCost += r.costAmt; totalMv += r.mv; });
+    var totalCost = 0, totalMv = 0, totalDayPnl = 0, prevMv = 0;
+    list.forEach(function (r) {
+      totalCost += r.costAmt;
+      totalMv += r.mv;
+      if (r.quote && r.shares > 0 && r.quote.prevClose > 0) {
+        r.dayPnl = (r.quote.price - r.quote.prevClose) * r.shares;
+        totalDayPnl += r.dayPnl;
+        prevMv += r.quote.prevClose * r.shares;
+      } else {
+        r.dayPnl = null;
+        prevMv += r.mv; // 现金 / 无行情按现值计
+      }
+    });
     var totalPnl = totalMv - totalCost;
 
     /* 周期汇总 */
@@ -1427,6 +1441,9 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
       var chgTxt = r.quote
         ? '<span class="' + pnlClass(r.quote.changePct) + '">' + (r.quote.changePct > 0 ? '+' : '') + r.quote.changePct.toFixed(2) + '%</span>'
         : '<span class="muted">--</span>';
+      var dayTxt = (r.dayPnl == null)
+        ? '<span class="muted">--</span>'
+        : '<span class="' + pnlClass(r.dayPnl) + '">' + (r.dayPnl > 0 ? '+' : '') + money(r.dayPnl) + '</span>';
       html += '<tr>' +
         '<td class="num" style="text-align:center;color:var(--muted);">' + r.no + '</td>' +
         '<td class="tb-name">' + esc(r.displayName) + '</td>' +
@@ -1438,6 +1455,7 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
         '<td class="num muted2">' + (r.costAmt ? money(r.costAmt) : '--') + '</td>' +
         '<td class="num">' + (r.mv ? money(r.mv) : '--') + '</td>' +
         '<td class="num ' + pnlClass(r.pnl) + '">' + (r.costAmt ? (r.pnl > 0 ? '+' : '') + money(r.pnl) : '--') + '</td>' +
+        '<td class="num">' + dayTxt + '</td>' +
         '<td class="pct">' + (totalMv > 0 && r.mv > 0 ? pct(r.mv, totalMv) + '%' : '--') + '</td>' +
         '<td style="text-align:center;"><button class="link-del" type="button" data-id="' + esc(r.id) + '">删除</button></td></tr>';
     }
@@ -1449,6 +1467,7 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
         '<td class="num">' + totalShares.toLocaleString('zh-CN') + '</td>' +
         '<td></td><td class="num">' + money(totalCost) + '</td><td class="num">' + money(totalMv) + '</td>' +
         '<td class="num ' + pnlClass(totalPnl) + '">' + (totalPnl > 0 ? '+' : '') + money(totalPnl) + '</td>' +
+        '<td class="num ' + pnlClass(totalDayPnl) + '">' + (quoteAt ? ((totalDayPnl > 0 ? '+' : '') + money(totalDayPnl)) : '--') + '</td>' +
         '<td class="pct">' + (totalMv > 0 ? '100.00%' : '--') + '</td><td></td></tr>' : '';
     $('detailEmpty').style.display = list.length ? 'none' : 'block';
 
@@ -1486,23 +1505,14 @@ footer.foot { color: var(--muted); font-size: 12px; text-align: center; padding-
     $('statPnlPct').textContent = totalCost > 0 ? (totalPnl > 0 ? '+' : '') + (totalPnl / totalCost * 100).toFixed(2) + '%' : '';
     $('statPnlPct').className = 'sub ' + pnlClass(totalPnl);
 
-    /* 当日盈亏 = Σ (现价 - 昨收) × 持股数 */
-    var dayPnl = 0, prevMv = 0;
-    list.forEach(function (r) {
-      if (r.quote && r.shares > 0 && r.quote.prevClose > 0) {
-        dayPnl += (r.quote.price - r.quote.prevClose) * r.shares;
-        prevMv += r.quote.prevClose * r.shares;
-      } else {
-        prevMv += r.mv; // 现金 / 无行情部分按现值计
-      }
-    });
-    var dayPct = prevMv > 0 ? dayPnl / prevMv * 100 : 0;
+    /* 当日盈亏：直接用上面汇总好的 totalDayPnl */
+    var dayPct = prevMv > 0 ? totalDayPnl / prevMv * 100 : 0;
     var dpe = $('statDayPnl');
-    dpe.textContent = (dayPnl > 0 ? '+' : '') + money(dayPnl);
-    dpe.className = 'v ' + pnlClass(dayPnl);
+    dpe.textContent = (totalDayPnl > 0 ? '+' : '') + money(totalDayPnl);
+    dpe.className = 'v ' + pnlClass(totalDayPnl);
     var dpp = $('statDayPnlPct');
-    dpp.textContent = quoteAt ? ((dayPnl > 0 ? '+' : '') + dayPct.toFixed(2) + '%') : '待获取行情';
-    dpp.className = 'sub ' + (quoteAt ? pnlClass(dayPnl) : 'muted');
+    dpp.textContent = quoteAt ? ((totalDayPnl > 0 ? '+' : '') + dayPct.toFixed(2) + '%') : '待获取行情';
+    dpp.className = 'sub ' + (quoteAt ? pnlClass(totalDayPnl) : 'muted');
     $('statStrong').textContent = pct(strong, totalMv);
     $('statWeak').textContent = pct(weak, totalMv);
     $('statStrongAmt').textContent = shortMoney(strong);
